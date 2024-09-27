@@ -1,0 +1,6 @@
+setup.py
+CRT_Nodes.egg-info/PKG-INFO
+CRT_Nodes.egg-info/SOURCES.txt
+CRT_Nodes.egg-info/dependency_links.txt
+CRT_Nodes.egg-info/entry_points.txt
+CRT_Nodes.egg-info/top_level.txt
