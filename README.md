@@ -16,6 +16,8 @@ This set includes toggle nodes for Lora Unet blocks and a node to remove trailin
 3. **Remove Trailing Comma**: 
    - This node takes a string input and removes the last trailing comma, providing a clean string output for the Flux LoRA training "block_args".
 
+![workflow (63)](https://github.com/user-attachments/assets/53e01a25-4f57-4dd0-bb7a-581907dd652a)
+
 
 Example:
 
