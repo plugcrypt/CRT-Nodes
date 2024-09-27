@@ -32,12 +32,15 @@ Similar to the L1 node, connect your input and specify blocks to toggle.
 Remove Trailing Comma Node
 Connect the input string that may have a trailing comma, and the output will be a cleaned string without the trailing comma.
 
+
+
+
+
+
 Contributing
 Feel free to submit issues and pull requests. Contributions are welcome!
-
 License
 This project is licensed under the MIT License. See the LICENSE file for more details.
-
 Acknowledgments
 Thanks to the ComfyUI community for their support and contributions.
 
