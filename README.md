@@ -17,6 +17,7 @@ This set includes toggle nodes for Lora Unet blocks and a node to remove trailin
    - This node takes a string input and removes the last trailing comma, providing a clean string output for the Flux LoRA training "block_args".
 
 ![2024-09-27 11_57_58-_Unsaved Workflow](https://github.com/user-attachments/assets/9c753b6c-c3f0-4c25-8a0c-656152e0ab6b)
+![2024-09-27 12_09_34-run_nvidia_gpu - Copie bat - Raccourci](https://github.com/user-attachments/assets/2762cda0-aec0-4e3e-8657-43925dd690f1)
 
 
 Example:
