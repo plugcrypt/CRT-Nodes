@@ -16,6 +16,13 @@ This set includes toggle nodes for Lora Unet blocks and a node to remove trailin
 3. **Remove Trailing Comma**: 
    - This node takes a string input and removes the last trailing comma, providing a clean string output for the Flux LoRA training "block_args".
 
+4. **lora loader str**:
+   - This is a simple LoRA Loader that can output the name of the model loaded as a string, with a switch to also embed the strength if wanted.
+
+5. **boolean transform node**:
+   - Clamp list value to 1 if non zero
+
+
 Easy LoRA Trainer - https://civitai.com/models/743615/easy-lora-trainer
 ![2024-09-27 11_57_58-_Unsaved Workflow](https://github.com/user-attachments/assets/9c753b6c-c3f0-4c25-8a0c-656152e0ab6b)
 ![2024-09-27 12_09_34-run_nvidia_gpu - Copie bat - Raccourci](https://github.com/user-attachments/assets/2762cda0-aec0-4e3e-8657-43925dd690f1)
@@ -33,9 +40,11 @@ Similar to the L1 node, connect your input and specify blocks to toggle.
 Remove Trailing Comma Node
 Connect the input string that may have a trailing comma, and the output will be a cleaned string without the trailing comma.
 
+lora loader str
+You want to compair LoRA and combine the images output for comparison purpose (Ex: CR Simple Image Compare), you can use the string output of the lora loader as text input fore the compare node.
 
-
-
+boolean transform node
+Use it after "Mask Or Image To Weight" from KJNodes. It was made for logic purpose, and basically say (If a mask is detected, the boolean output will be "True", if not, "False". 
 
 
 Contributing

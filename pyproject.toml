@@ -1,0 +1,15 @@
+[project]
+name = "crt-nodes"
+description = "CRT-Nodes is a collection of custom nodes for ComfyUI"
+version = "1.0.1"
+license = {file = "LICENSE"}
+
+[project.urls]
+Repository = "https://github.com/plugcrypt/CRT-Nodes"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool]
+[tool.comfy]
+PublisherId = "crt"
+DisplayName = "CRT-Nodes"
+Icon = ""
