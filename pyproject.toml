@@ -1,7 +1,7 @@
 [project]
 name = "crt-nodes"
 description = "CRT-Nodes is a collection of custom nodes for ComfyUI"
-version = "2.18.0"
+version = "2.19.0"
 license = {file = "LICENSE"}
 dependencies = [
     "opencv-contrib-python",

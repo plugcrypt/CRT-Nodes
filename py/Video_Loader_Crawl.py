@@ -1,4 +1,5 @@
 import math
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -6,6 +7,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+
+from ._crawl_common import pick_folder, scan_tree, to_int
 
 
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mkv", ".avi", ".mov"}
@@ -134,9 +137,23 @@ class VideoLoaderCrawl:
                 ),
                 "seed": (
                     "INT",
-                    {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF},
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 0xFFFFFFFFFFFFFFFF,
+                        "control_after_generate": True,
+                        "tooltip": "Selects the file. With no subfolder seed connected, crawls each folder's first file, then each folder's second file, etc.",
+                    },
                 ),
-                "crawl_subfolders": ("BOOLEAN", {"default": False}),
+                "max_depth": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": -1,
+                        "max": 100,
+                        "tooltip": "Subfolder crawl depth. 0 = only the root folder, 1 = one level deep, -1 = infinite.",
+                    },
+                ),
                 "remove_extension": (
                     "BOOLEAN",
                     {"default": False, "tooltip": "Remove file extension from output name"},
@@ -180,7 +197,16 @@ class VideoLoaderCrawl:
                         "tooltip": "After even-frame selection, resize only the retained frames to this target area with Lanczos while preserving aspect ratio. Use 0 to keep the source resolution.",
                     },
                 ),
-            }
+            },
+            "optional": {
+                "subfolder_seed": (
+                    "INT",
+                    {
+                        "forceInput": True,
+                        "tooltip": "Selects the folder as seed % number_of_folders. Leave unconnected to crawl folders column-major with the main seed.",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("IMAGE", "STRING", "STRING", "FLOAT", "INT", "AUDIO")
@@ -260,12 +286,13 @@ class VideoLoaderCrawl:
         self,
         folder_path,
         seed,
-        crawl_subfolders,
+        max_depth,
         remove_extension,
         frames_limit,
         framerate,
         even_batch_picker,
         megapixels,
+        subfolder_seed=None,
     ):
         if not folder_path or not folder_path.strip():
             print("[CRT Video Loader] Error: folder path is empty.")
@@ -276,35 +303,43 @@ class VideoLoaderCrawl:
             print(f"[CRT Video Loader] Error: folder '{folder}' was not found.")
             return self._blank_output()
 
-        cache_key = str(folder.resolve()) + ("_sub" if crawl_subfolders else "")
+        seed = to_int(seed)
+        max_depth = to_int(max_depth)
+        sub_seed = to_int(subfolder_seed) if subfolder_seed is not None else None
+
+        cache_key = (str(folder.resolve()), max_depth)
         current_mtime = folder.stat().st_mtime
 
-        if cache_key not in self.cache or self.cache[cache_key]["mtime"] != current_mtime:
-            print(f"[CRT Video Loader] Scanning '{folder}' for videos...")
-            try:
-                path_iterator = folder.rglob("*") if crawl_subfolders else folder.glob("*")
-                files = sorted(
-                    path
-                    for path in path_iterator
-                    if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
-                )
-                self.cache[cache_key] = {"files": files, "mtime": current_mtime}
-                print(f"[CRT Video Loader] Cached {len(files)} video path(s).")
-            except Exception as error:
-                print(f"[CRT Video Loader] Error accessing '{folder}': {error}")
-                self.cache.pop(cache_key, None)
-                return self._blank_output()
-
-        files = self.cache[cache_key]["files"]
-        if not files:
-            print(f"[CRT Video Loader] No supported video files found in '{folder}'.")
+        try:
+            if cache_key not in self.cache or self.cache[cache_key]["mtime"] != current_mtime:
+                print(f"[CRT Video Loader] Scanning '{folder}' (depth {max_depth})...")
+                folders, files_by_folder = scan_tree(folder, max_depth)
+                self.cache[cache_key] = {"folders": folders, "files": files_by_folder, "mtime": current_mtime}
+                print(f"[CRT Video Loader] Cached folder tree from '{folder}'.")
+            folders = self.cache[cache_key]["folders"]
+            files_by_folder = self.cache[cache_key]["files"]
+        except Exception as error:
+            print(f"[CRT Video Loader] Error accessing '{folder}': {error}")
+            self.cache.pop(cache_key, None)
             return self._blank_output()
 
-        selected_index = int(seed) % len(files)
+        selected_folder, inner_seed = pick_folder(folders, sub_seed, seed)
+        if selected_folder is None:
+            print("[CRT Video Loader] No folders found under the given path.")
+            return self._blank_output()
+
+        files = [p for p in files_by_folder.get(os.path.normpath(str(selected_folder)), []) if p.suffix.lower() in VIDEO_EXTENSIONS]
+        files.sort()
+
+        if not files:
+            print(f"[CRT Video Loader] No supported video files found in '{selected_folder}'.")
+            return self._blank_output()
+
+        selected_index = inner_seed % len(files)
         selected_file = files[selected_index]
         print(
-            f"[CRT Video Loader] Seed {seed} -> video {selected_index + 1}/{len(files)}: "
-            f"'{selected_file.name}'"
+            f"[CRT Video Loader] Seed {seed} -> folder '{selected_folder.name}' video "
+            f"{selected_index + 1}/{len(files)}: '{selected_file.name}'"
         )
 
         cap = None

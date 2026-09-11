@@ -1,4 +1,5 @@
 from concurrent.futures import Future, ThreadPoolExecutor
+import os
 import re
 import threading
 from pathlib import Path
@@ -7,6 +8,7 @@ import torch
 import torchaudio.functional as TAF
 
 from .Audio_Loader_Crawl import _load_audio_file
+from ._crawl_common import scan_tree, to_int
 
 
 VALID_EXTENSIONS = (".wav", ".mp3", ".flac", ".ogg")
@@ -213,7 +215,15 @@ class CRT_AudioLoaderCrawlBatch:
                     ["all", "wav", "mp3", "flac", "ogg"],
                     {"default": "all", "tooltip": "File extension to filter for. 'all' includes wav, mp3, flac and ogg."},
                 ),
-                "crawl_subfolders": ("BOOLEAN", {"default": False}),
+                "max_depth": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": -1,
+                        "max": 100,
+                        "tooltip": "Subfolder crawl depth. 0 = only the root folder, 1 = one level deep, -1 = infinite.",
+                    },
+                ),
                 "remove_extension": ("BOOLEAN", {"default": False}),
                 "sample_rate": (
                     "INT",
@@ -253,7 +263,16 @@ class CRT_AudioLoaderCrawlBatch:
                         "tooltip": "Print each selected file index and name to the console.",
                     },
                 ),
-            }
+            },
+            "optional": {
+                "subfolder_seed": (
+                    "INT",
+                    {
+                        "forceInput": True,
+                        "tooltip": "Restricts the batch window to the folder selected by seed % number_of_folders. Leave unconnected to batch across the whole tree.",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("AUDIO", "STRING", "STRING", "INT", "INT")
@@ -275,13 +294,14 @@ class CRT_AudioLoaderCrawlBatch:
         batch_count,
         seed,
         file_extension,
-        crawl_subfolders,
+        max_depth,
         remove_extension,
         sample_rate,
         max_length_seconds,
         start_offset_seconds,
         gain_db,
         print_index,
+        subfolder_seed=None,
     ):
         tag = "[CRT Audio Loader Crawl Batch]"
 
@@ -311,39 +331,34 @@ class CRT_AudioLoaderCrawlBatch:
         is_all = raw_ext == "all"
         if is_all:
             extension = "all"
-            cache_key = f"{folder}_{crawl_subfolders}_all"
         else:
             extension = raw_ext
             if not extension.startswith("."):
                 extension = f".{extension}"
-            cache_key = f"{folder}_{crawl_subfolders}_{extension}"
         current_mtime = folder.stat().st_mtime_ns
+        seed = to_int(seed)
+        max_depth = to_int(max_depth)
+        sub_seed = to_int(subfolder_seed) if subfolder_seed is not None else None
+        cache_key = f"{folder}_{max_depth}_{extension}_s{sub_seed if sub_seed is not None else 'x'}"
+
+        def _tree_files():
+            folders, files_by_folder = scan_tree(folder, max_depth)
+            if sub_seed is not None:
+                if not folders:
+                    return []
+                sel_folder = folders[sub_seed % len(folders)]
+                return files_by_folder.get(os.path.normpath(str(sel_folder)), [])
+            return [p for fl in files_by_folder.values() for p in fl]
 
         def _collect_files():
+            tree_files = _tree_files()
             if is_all:
                 seen = set()
-                all_files = []
-                for ext in VALID_EXTENSIONS:
-                    iterator = folder.rglob(f"*{ext}") if crawl_subfolders else folder.glob(f"*{ext}")
-                    for p in iterator:
-                        if p.is_file() and p not in seen:
-                            seen.add(p)
-                            all_files.append(p)
-                return all_files
-            else:
-                iterator = folder.rglob(f"*{extension}") if crawl_subfolders else folder.glob(f"*{extension}")
-                return [p for p in iterator if p.is_file()]
+                return [p for p in tree_files if p.suffix.lower() in VALID_EXTENSIONS and not (p in seen or seen.add(p))]
+            return [p for p in tree_files if p.suffix.lower() == extension]
 
         def _count_files():
-            if is_all:
-                cnt = 0
-                for ext in VALID_EXTENSIONS:
-                    iterator = folder.rglob(f"*{ext}") if crawl_subfolders else folder.glob(f"*{ext}")
-                    cnt += sum(1 for p in iterator if p.is_file())
-                return cnt
-            else:
-                iterator = folder.rglob(f"*{extension}") if crawl_subfolders else folder.glob(f"*{extension}")
-                return sum(1 for p in iterator if p.is_file())
+            return len(_collect_files())
 
         cached = self.cache.get(cache_key)
         need_rescan = True

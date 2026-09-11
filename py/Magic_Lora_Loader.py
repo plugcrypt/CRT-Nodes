@@ -249,11 +249,32 @@ def _compute_merged_lora(model, pre_patch_counts: dict) -> dict:
     stored weight shapes. The dense deltas are NOT materialized here: on large
     models they can total tens of GB of RAM, so the consumer builds them one key
     at a time via _materialize_delta."""
-    # Collect actual weight shapes for validation (cheap - just metadata, no tensor copies).
+    # Collect logical weight shapes for validation (cheap - just metadata, no tensor copies).
+    # NOTE: model_state_dict() reports packed storage sizes for quantized layers
+    # (e.g. 4-bit w4a8 stores [N, K/2], half the logical numel), so override with
+    # each module's _orig_shape where available.
     weight_numel = {}
     try:
         sd = model.model_state_dict()
-        weight_numel = {k: v.numel() for k, v in sd.items()}
+        for k, v in sd.items():
+            try:
+                weight_numel[k] = v.numel()
+            except Exception:
+                continue
+    except Exception:
+        pass
+    try:
+        base = getattr(model, "model", None)
+        mods = base.named_modules() if base is not None and hasattr(base, "named_modules") else []
+        for name, mod in mods:
+            orig = getattr(mod, "_orig_shape", None)
+            if not orig:
+                continue
+            n = 1
+            for d in orig:
+                n *= int(d)
+            for cand in (name + ".weight", "diffusion_model." + name + ".weight"):
+                weight_numel[cand] = n
     except Exception:
         pass
 
@@ -810,10 +831,10 @@ class SaveMergedLora:
                         "default": 0.99,
                         "min": 0.0,
                         "max": 1000.0,
-                        "step": 0.01,
+                        "step": 0.001,
                         "tooltip": (
                             "Target for dynamic_method. sv_fro: kept Frobenius norm ratio "
-                            "per layer, e.g. 0.99. sv_ratio: keep singular values above "
+                            "per layer, e.g. 0.99, 0.995, 0.998. sv_ratio: keep singular values above "
                             "max(S)/dynamic_param, e.g. 10-100. Ignored when "
                             "dynamic_method is disabled."
                         ),

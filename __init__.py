@@ -1,7 +1,7 @@
 """
 @author: CRT
 @title: CRT-Nodes
-@version: 2.18.0
+@version: 2.19.0
 @project: "https://github.com/PGCRT/CRT-Nodes",
 @description: Set of nodes for ComfyUI
 https://discord.gg/8wYS9MBQqp
@@ -77,6 +77,7 @@ if True:
     from .py.Chroma_Key_Overlay import CRTChromaKeyOverlay
     from .py.Get_First_Last_Frame import CRTFirstLastFrameSelector
     from .py.Even_Batch_Picker import CRTEvenBatchPicker
+    from .py.Image_Unbatch import CRTImageUnbatch
     from .py.Seamless_Loop_Blender import SeamlessLoopBlender
     from .py.Crop_By_Percent import CRTPctCropCalculator
     from .py.Audio_Previewer import AudioPreviewer
@@ -136,6 +137,8 @@ if True:
     from .py.Join_Strings import CRT_JoinStrings
     from .py.Remove_Lines import CRT_RemoveLines
     from .py.Int_Value import CRT_IntValue
+    from .py.Int_To_String import CRT_IntToString
+    from .py.FileSearch_Crawl import FileSearchCrawl
     from .py.Minimax_Length import CRT_MinimaxLength
     from .py.Mono_To_Stereo_Converter import MonoToStereoConverter
     from .py.Any_Trigger import AnyTrigger
@@ -157,8 +160,10 @@ if True:
     from .py.MiniMaxH3_Unified_Sampler import (
         CRT_MiniMaxH3USConfig,
         CRT_MiniMaxH3USModelsPipe,
+        CRT_MiniMaxH3USModelsPipeCNET,
         CRT_MiniMaxH3UnifiedSampler,
     )
+    from .py.H3_Fun_ControlNet import CRT_MiniMaxH3FunControlApply
     from .py.Isolate import (
         CRT_IsolateInput,
         CRT_IsolateOutput,
@@ -173,6 +178,10 @@ if True:
     )
     from .py.VAE_Decode_Last_Frame import CRTVAEDecodeLastFrame
     from .py.DepthAnything3_CRT import CRT_DepthAnything3
+    from .py.MarigoldV2_CRT import CRT_MarigoldV2Depth
+    from .py.YuE2_Music_Generator import (
+        YuEMusicGenerator,
+    )
 
     # Add GGUF unet folder path if not already registered
     try:
@@ -264,6 +273,7 @@ NODE_CLASS_MAPPINGS = {
     "CRTChromaKeyOverlay": CRTChromaKeyOverlay,
     "CRTFirstLastFrameSelector": CRTFirstLastFrameSelector,
     "CRTEvenBatchPicker": CRTEvenBatchPicker,
+    "CRTImageUnbatch": CRTImageUnbatch,
     "SeamlessLoopBlender": SeamlessLoopBlender,
     "CRTPctCropCalculator": CRTPctCropCalculator,
     "AudioPreviewer": AudioPreviewer,
@@ -321,6 +331,8 @@ NODE_CLASS_MAPPINGS = {
     "ExtractQA": ExtractQA,
     "MergeQA": MergeQA,
     "CRT_IntValue": CRT_IntValue,
+    "CRT_IntToString": CRT_IntToString,
+    "FileSearchCrawl": FileSearchCrawl,
     "CRT_MinimaxLength": CRT_MinimaxLength,
     "MonoToStereoConverter": MonoToStereoConverter,
     "AnyTrigger": AnyTrigger,
@@ -340,6 +352,8 @@ NODE_CLASS_MAPPINGS = {
     "CRT_MiniMaxH3USModelsPipe": CRT_MiniMaxH3USModelsPipe,
     "CRT_MiniMaxH3USConfig": CRT_MiniMaxH3USConfig,
     "CRT_MiniMaxH3UnifiedSampler": CRT_MiniMaxH3UnifiedSampler,
+    "CRT_MiniMaxH3USModelsPipeCNET": CRT_MiniMaxH3USModelsPipeCNET,
+    "CRT_MiniMaxH3FunControlApply": CRT_MiniMaxH3FunControlApply,
     "CRT_IsolateInput": CRT_IsolateInput,
     "CRT_IsolateOutput": CRT_IsolateOutput,
     "CRT_IsolateInputCLIPSeg": CRT_IsolateInputCLIPSeg,
@@ -348,6 +362,8 @@ NODE_CLASS_MAPPINGS = {
     "CRT_UnslothThinkingDisplay": CRT_UnslothThinkingDisplay,
     "CRTVAEDecodeLastFrame": CRTVAEDecodeLastFrame,
     "CRT_DepthAnything3": CRT_DepthAnything3,
+    "CRT_MarigoldV2Depth": CRT_MarigoldV2Depth,
+    "YuEMusicGenerator": YuEMusicGenerator,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -381,6 +397,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CRTChromaKeyOverlay": "Chroma Key Overlay (CRT)",
     "CRTFirstLastFrameSelector": "Get First & Last Frame (CRT)",
     "CRTEvenBatchPicker": "Even Batch Picker (CRT)",
+    "CRTImageUnbatch": "Image Unbatch (CRT)",
     "SeamlessLoopBlender": "Seamless Loop Blender (CRT)",
     "CRTPctCropCalculator": "Percentage Crop Calculator (CRT)",
     "AudioPreviewer": "Preview Audio (CRT)",
@@ -440,6 +457,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ExtractQA": "Extract Q/A (CRT)",
     "MergeQA": "Merge Q/A (CRT)",
     "CRT_IntValue": "Int Value (CRT)",
+    "CRT_IntToString": "Int to String (CRT)",
+    "FileSearchCrawl": "FileSearch Crawl (CRT)",
     "CRT_MinimaxLength": "Minimax Length (CRT)",
     "MonoToStereoConverter": "Mono to Stereo Converter (CRT)",
     "AnyTrigger": "Any Trigger (CRT)",
@@ -459,6 +478,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CRT_MiniMaxH3USModelsPipe": "MiniMax H3 US Models Pipe (CRT)",
     "CRT_MiniMaxH3USConfig": "MiniMax H3 US Config (CRT)",
     "CRT_MiniMaxH3UnifiedSampler": "MiniMax H3 Unified Sampler (CRT)",
+    "CRT_MiniMaxH3USModelsPipeCNET": "MiniMax H3 US Models Pipe CNET (CRT)",
+    "CRT_MiniMaxH3FunControlApply": "MiniMax H3 Fun Control Apply (CRT)",
     "CRT_IsolateInput": "Isolate Input SAM3.1 (CRT)",
     "CRT_IsolateOutput": "Isolate Output (CRT)",
     "CRT_IsolateInputCLIPSeg": "Isolate Input CLIPSeg (CRT)",
@@ -466,7 +487,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "UnslothLLM": "Unsloth Studio Bridge (CRT)",
     "CRT_UnslothThinkingDisplay": "Unsloth Studio Bridge Thinking Display (CRT)",
     "CRTVAEDecodeLastFrame": "VAE Decode Last Frame (CRT)",
-    "CRT_DepthAnything3": "DepthAnything3 (CRT)",
+    "CRT_DepthAnything3": "Fast Depth Anything v3 (CRT)",
+    "CRT_MarigoldV2Depth": "Heavy Depth Marigold v2 (CRT)",
+    "YuEMusicGenerator": "YuE Music Generator (CRT)",
 }
 
 NODE_CLASS_MAPPINGS.update(CRT_AUTODL_NODE_CLASS_MAPPINGS)

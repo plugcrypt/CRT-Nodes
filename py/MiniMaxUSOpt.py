@@ -44,6 +44,8 @@ class _ChunkLog:
 
 def _make_chunked_forward(original_forward, chunks, min_tokens, chunk_log):
     def forward(x):
+        import torch
+
         if x.ndim != 2 or x.shape[0] < min_tokens or x.requires_grad:
             return original_forward(x)
 

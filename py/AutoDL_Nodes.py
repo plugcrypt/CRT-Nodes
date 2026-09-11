@@ -19,6 +19,8 @@ from comfy.ldm.modules.attention import (
 
 from .download_progress import download_url_with_progress
 
+from .H3_Fun_ControlNet import load_h3_fun_control
+
 
 TAG = "crt-autodl"
 SAGE_ATTENTION_MODES = [
@@ -204,6 +206,11 @@ MODELS = {
         "folder": "vae",
         "filename": "minimax_h3_video_vae_fp16.safetensors",
         "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors",
+    },
+    "minimax_h3_fun_controlnet": {
+        "folder": "controlnet",
+        "filename": "minimax_h3_fun_controlnet_union_pruned_int8_convrot.safetensors",
+        "url": "https://huggingface.co/Kijai/MiniMax-H3-experimental/resolve/main/controlnet/minimax_h3_fun_controlnet_union_pruned_int8_convrot.safetensors",
     },
     # LTX2.5
     "ltx25_model_32gb": {
@@ -722,6 +729,20 @@ class _FixedLoRALoader:
         return (model_lora,)
 
 
+class _FixedControlNetLoader:
+    RETURN_TYPES = ("H3_FUN_CONTROL",)
+    RETURN_NAMES = ("control_net",)
+    FUNCTION = "load_controlnet"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    def load_controlnet(self):
+        path = ensure_model(self.MODEL_KEY)
+        return (load_h3_fun_control(path),)
+
+
 class _GGUFModelLoader:
     RETURN_TYPES = ("MODEL",)
     RETURN_NAMES = ("MODEL",)
@@ -955,6 +976,11 @@ class MiniMaxH3REF2VATurboLoRA(_FixedLoRALoader):
     MODEL_KEY = "minimax_h3_ref2va_turbo_lora"
 
 
+class MiniMaxH3FunControlNet(_FixedControlNetLoader):
+    CATEGORY = "CRT/AutoDL/MINIMAXH3"
+    MODEL_KEY = "minimax_h3_fun_controlnet"
+
+
 # LTX2.5
 class LTX25ModelSelector(_FixedDiffusionSelector):
     CATEGORY = "CRT/AutoDL/LTX2.5"
@@ -1185,6 +1211,7 @@ NODE_CLASS_MAPPINGS = {
     "CRTAutoDLMiniMaxH3CLIPSelector": MiniMaxH3CLIPSelector,
     "CRTAutoDLMiniMaxH3FL2VATurboLoRA": MiniMaxH3FL2VATurboLoRA,
     "CRTAutoDLMiniMaxH3REF2VATurboLoRA": MiniMaxH3REF2VATurboLoRA,
+    "CRTAutoDLMiniMaxH3FunControlNet": MiniMaxH3FunControlNet,
     "CRTAutoDLLTX25ModelSelector": LTX25ModelSelector,
     "CRTAutoDLLTX25AudioVAE": LTX25AudioVAE,
     "CRTAutoDLLTX25VideoVAE": LTX25VideoVAE,
@@ -1236,6 +1263,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CRTAutoDLMiniMaxH3CLIPSelector": "MiniMax H3 CLIP (CRT AutoDL)",
     "CRTAutoDLMiniMaxH3FL2VATurboLoRA": "MiniMax H3 FL2VA Turbo LoRA (CRT AutoDL)",
     "CRTAutoDLMiniMaxH3REF2VATurboLoRA": "MiniMax H3 REF2VA Turbo LoRA (CRT AutoDL)",
+    "CRTAutoDLMiniMaxH3FunControlNet": "MiniMax H3 Fun ControlNet (CRT AutoDL)",
     "CRTAutoDLLTX25ModelSelector": "LTX2.5 Model (CRT AutoDL)",
     "CRTAutoDLLTX25AudioVAE": "LTX2.5 AUDIO VAE (CRT AutoDL)",
     "CRTAutoDLLTX25VideoVAE": "LTX2.5 VIDEO VAE (CRT AutoDL)",

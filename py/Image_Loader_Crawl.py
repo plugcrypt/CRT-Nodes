@@ -4,6 +4,8 @@ import torch
 from PIL import Image
 import numpy as np
 
+from ._crawl_common import pick_folder, scan_tree, to_int
+
 
 class ImageLoaderCrawl:
     def __init__(self):
@@ -15,10 +17,36 @@ class ImageLoaderCrawl:
         return {
             "required": {
                 "folder_path": ("STRING", {"default": ""}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
-                "crawl_subfolders": ("BOOLEAN", {"default": False}),
+                "seed": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 0xFFFFFFFFFFFFFFFF,
+                        "control_after_generate": True,
+                        "tooltip": "Selects the file. With no subfolder seed connected, crawls each folder's first file, then each folder's second file, etc.",
+                    },
+                ),
+                "max_depth": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": -1,
+                        "max": 100,
+                        "tooltip": "Subfolder crawl depth. 0 = only the root folder, 1 = one level deep, -1 = infinite.",
+                    },
+                ),
                 "remove_extension": ("BOOLEAN", {"default": False}),
-            }
+            },
+            "optional": {
+                "subfolder_seed": (
+                    "INT",
+                    {
+                        "forceInput": True,
+                        "tooltip": "Selects the folder as seed % number_of_folders. Leave unconnected to crawl folders column-major with the main seed.",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("IMAGE", "STRING", "STRING", "INT", "STRING")
@@ -39,7 +67,7 @@ class ImageLoaderCrawl:
             print(f"[ERROR] Error reading sidecar '{sidecar}': {str(e)}")
             return "No corresponding text file found"
 
-    def load_image_incrementally(self, folder_path, seed, crawl_subfolders, remove_extension):
+    def load_image_incrementally(self, folder_path, seed, max_depth, remove_extension, subfolder_seed=None):
         # Create a blank image as fallback
         def create_blank_image():
             blank = np.zeros((512, 512, 3), dtype=np.float32)
@@ -53,37 +81,43 @@ class ImageLoaderCrawl:
             print(f"[ERROR] Error: Folder '{folder}' not found.")
             return (create_blank_image(), "Error: Folder not found", "", 0, "")
 
+        seed = to_int(seed)
+        max_depth = to_int(max_depth)
+        sub_seed = to_int(subfolder_seed) if subfolder_seed is not None else None
+
         # --- Smart Caching Logic ---
-        cache_key = str(folder.resolve()) + ("_sub" if crawl_subfolders else "")
+        cache_key = (str(folder.resolve()), max_depth)
         current_mtime = folder.stat().st_mtime
 
-        # Check if cache is invalid (key doesn't exist or modification time has changed)
-        if cache_key not in self.cache or self.cache[cache_key]['mtime'] != current_mtime:
-            print(f"[INFO] Folder changed or not cached. Scanning '{folder}'...")
-            valid_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.ti', '.gi', '.webp'}
-            try:
-                path_iterator = folder.rglob('*') if crawl_subfolders else folder.glob('*')
-                files = sorted([p for p in path_iterator if p.is_file() and p.suffix.lower() in valid_extensions])
+        try:
+            if cache_key not in self.cache or self.cache[cache_key]['mtime'] != current_mtime:
+                print(f"[INFO] Folder changed or not cached. Scanning '{folder}' (depth {max_depth})...")
+                folders, files_by_folder = scan_tree(folder, max_depth)
+                self.cache[cache_key] = {'folders': folders, 'files': files_by_folder, 'mtime': current_mtime}
+                print(f"[OK] Cached folder tree from '{folder}'")
+            folders = self.cache[cache_key]['folders']
+            files_by_folder = self.cache[cache_key]['files']
+        except Exception as e:
+            print(f"[ERROR] Error accessing folder '{folder}': {str(e)}")
+            if cache_key in self.cache:
+                del self.cache[cache_key]
+            return (create_blank_image(), "Error accessing folder", "", 0, "")
 
-                # Update the cache with the new file list and the current modification time
-                self.cache[cache_key] = {'files': files, 'mtime': current_mtime}
-                print(f"[OK] Cached {len(files)} files from '{folder}'")
-            except Exception as e:
-                print(f"[ERROR] Error accessing folder '{folder}': {str(e)}")
-                # Clear bad cache entry if it exists
-                if cache_key in self.cache:
-                    del self.cache[cache_key]
-                return (create_blank_image(), "Error accessing folder", "", 0, "")
+        selected_folder, inner_seed = pick_folder(folders, sub_seed, seed)
+        if selected_folder is None:
+            print("[ERROR] No folders found under the given path.")
+            return (create_blank_image(), "No folders found", "", 0, "")
 
-        # Retrieve the list of files from the (now guaranteed to be up-to-date) cache
-        files = self.cache[cache_key]['files']
+        valid_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.ti', '.gi', '.webp'}
+        files = [p for p in files_by_folder.get(os.path.normpath(str(selected_folder)), []) if p.suffix.lower() in valid_extensions]
+        files.sort()
 
         if not files:
-            print(f"[ERROR] Warning: No valid image files found in '{folder}'.")
+            print(f"[ERROR] Warning: No valid image files found in '{selected_folder}'.")
             return (create_blank_image(), "No images found", "", 0, "")
 
         num_files = len(files)
-        selected_index = seed % num_files
+        selected_index = inner_seed % num_files
         selected_file = files[selected_index]
 
         try:
@@ -95,7 +129,7 @@ class ImageLoaderCrawl:
 
             base_name = selected_file.stem if remove_extension else selected_file.name
             sidecar_txt = self._load_sidecar_txt(selected_file)
-            print(f"[OK] Seed {seed} -> Image {selected_index + 1}/{num_files}: '{base_name}' from '{selected_file.name}'")
+            print(f"[OK] Seed {seed} -> Folder '{selected_folder.name}' Image {selected_index + 1}/{num_files}: '{base_name}'")
 
             return (img_tensor, base_name, str(selected_file.parent.resolve()), num_files, sidecar_txt)
         # Self-healing: If a file is in the cache but was deleted just before loading, this will catch it.

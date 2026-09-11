@@ -1,12 +1,14 @@
 import math
 import os
+import logging
 
 import torch
 import comfy.sd
 import comfy.model_management as mm
 import comfy.utils
 import folder_paths
-from tqdm import tqdm
+from comfy.ldm.modules.attention import get_attention_function, attention_basic
+from comfy.ldm.depth_anything_3 import preprocess as da3_preprocess
 
 from .download_progress import download_url_with_progress
 from comfy_extras.nodes_depth_anything_3 import DA3Inference, DA3Render
@@ -20,6 +22,27 @@ MODEL_OPTIONS = [
     "depth_anything_3_mono_large.safetensors",
     "depth_anything_3_metric_large.safetensors",
 ]
+
+_ATTENTION_METHODS = [
+    "comfy_kitchen_int8",
+    "sage",
+    "sage3",
+    "flash",
+    "xformers",
+    "pytorch",
+    "sub_quad",
+    "split",
+    "basic",
+]
+
+
+def _resolve_attention(method):
+    if method == "basic":
+        return attention_basic
+    func = get_attention_function(method, None)
+    if func is None:
+        logging.warning(f"[{TAG}] Attention backend '{method}' is not installed; using ComfyUI default.")
+    return func
 
 
 def _geometry_estimation_dir():
@@ -59,43 +82,62 @@ def _unwrap_node_output(value):
     return value
 
 
-def _stack_geometries(geometries):
-    if not geometries:
-        return {}
-    stacked = {}
-    for key in geometries[0]:
-        tensors = [g[key] for g in geometries]
-        if key == "mode":
-            stacked[key] = tensors[0]
-        elif key in ("extrinsics", "intrinsics"):
-            stacked[key] = torch.cat(tensors, dim=1)
-        else:
-            stacked[key] = torch.cat(tensors, dim=0)
-    return stacked
+def _run_da3_mono(model, image, resolution, max_batch_size):
+    B, H, W, _ = image.shape
+    mm.load_model_gpu(model)
+    diffusion = model.model.diffusion_model
+    device = mm.get_torch_device()
+    dtype = diffusion.dtype if diffusion.dtype is not None else torch.float32
+
+    chunk = max_batch_size if max_batch_size and max_batch_size > 0 else B
+
+    depths, confs, skies = [], [], []
+    for start in range(0, B, chunk):
+        batch = image[start:start + chunk].to(device)
+        x = da3_preprocess.preprocess_image(batch, process_res=resolution, method="upper_bound_resize")
+        x = x.to(dtype=dtype)
+        with torch.no_grad():
+            out = diffusion(x)
+
+        depths.append(torch.nn.functional.interpolate(
+            out["depth"].unsqueeze(1).float(), size=(H, W),
+            mode="bilinear", align_corners=False,
+        ).squeeze(1).cpu())
+        if "depth_conf" in out:
+            confs.append(torch.nn.functional.interpolate(
+                out["depth_conf"].unsqueeze(1).float(), size=(H, W),
+                mode="bilinear", align_corners=False,
+            ).squeeze(1).cpu())
+        if "sky" in out:
+            skies.append(torch.nn.functional.interpolate(
+                out["sky"].unsqueeze(1).float(), size=(H, W),
+                mode="bilinear", align_corners=False,
+            ).squeeze(1).cpu())
+
+    geometry = {
+        "depth": torch.cat(depths, dim=0).contiguous(),
+        "image": image[..., :3].cpu(),
+        "mode": "mono",
+    }
+    if confs:
+        geometry["confidence"] = torch.cat(confs, dim=0).contiguous()
+    if skies:
+        geometry["sky"] = torch.cat(skies, dim=0).contiguous()
+    return geometry
 
 
-def _run_da3_with_progress(model, image, resolution, mode, mode_dict):
+def _run_da3_with_progress(model, image, resolution, mode_dict, max_batch_size=0):
     B = image.shape[0]
-    if mode != "mono" or B <= 1:
-        pbar = comfy.utils.ProgressBar(1)
-        pbar.update(0)
+    pbar = comfy.utils.ProgressBar(B)
+    if mode_dict["mode"] == "mono":
+        geometry = _run_da3_mono(model, image, resolution, max_batch_size)
+    else:
         geometry = DA3Inference.execute.__func__(
-            DA3Inference, model, image, resolution, "upper_bound_resize", mode_dict
+            DA3Inference, model, image, resolution, "upper_bound_resize", mode_dict,
         )
         geometry = _unwrap_node_output(geometry)
-        pbar.update(1)
-        return geometry
-
-    geometries = []
-    pbar = comfy.utils.ProgressBar(B)
-    for i in tqdm(range(B), desc="[CRT DepthAnything3]", ncols=80, file=None, leave=False):
-        geo = DA3Inference.execute.__func__(
-            DA3Inference, model, image[i:i + 1], resolution, "upper_bound_resize", {"mode": "mono"}
-        )
-        geo = _unwrap_node_output(geo)
-        geometries.append(geo)
-        pbar.update(1)
-    return _stack_geometries(geometries)
+    pbar.update(B)
+    return geometry
 
 
 class CRT_DepthAnything3:
@@ -128,20 +170,21 @@ class CRT_DepthAnything3:
                 ),
             },
             "optional": {
-                "apply_sky_clip": ("BOOLEAN", {"default": False}),
-                "colored": ("BOOLEAN", {"default": False}),
-                "ref_view_strategy": (
-                    ["saddle_balanced", "saddle_sim_range", "first", "middle"],
-                    {"default": "saddle_balanced"},
+                "attention_method": (
+                    _ATTENTION_METHODS,
+                    {"default": "comfy_kitchen_int8", "tooltip": "Attention backend for the DINOv2 backbone. Falls back to the ComfyUI default if the selected backend is not installed."},
                 ),
-                "pose_method": (["cam_dec", "ray_pose"], {"default": "cam_dec"}),
+                "max_batch_size": (
+                    "INT",
+                    {"default": 0, "min": 0, "max": 256, "tooltip": "Max images per forward in mono mode (0 = all images in a single forward). Lower it to reduce peak VRAM."},
+                ),
             },
         }
 
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "execute"
-    CATEGORY = "CRT/DepthAnything3"
+    CATEGORY = "CRT/Depth"
 
     def execute(
         self,
@@ -153,10 +196,8 @@ class CRT_DepthAnything3:
         output,
         normalization,
         keep_model_loaded,
-        apply_sky_clip=False,
-        colored=False,
-        ref_view_strategy="saddle_balanced",
-        pose_method="cam_dec",
+        attention_method="comfy_kitchen_int8",
+        max_batch_size=0,
     ):
         H, W = image.shape[1], image.shape[2]
         resolution = _mp_to_resolution(megapixels, H, W)
@@ -174,22 +215,32 @@ class CRT_DepthAnything3:
         if da3_model is None:
             raise RuntimeError(f"[{TAG}] Failed to load DA3 model from: {model_path}")
 
+        attention = _resolve_attention(attention_method)
+        if attention is not None:
+            da3_model.set_model_optimized_attention(attention)
+
         mode_dict = {"mode": mode}
         if mode == "multiview":
-            mode_dict["ref_view_strategy"] = ref_view_strategy
-            mode_dict["pose_method"] = pose_method
+            mode_dict["ref_view_strategy"] = "saddle_balanced"
+            mode_dict["pose_method"] = "cam_dec"
 
-        geometry = _run_da3_with_progress(da3_model, image, resolution, mode, mode_dict)
+        geometry = _run_da3_with_progress(
+            da3_model, image, resolution, mode_dict,
+            max_batch_size=max_batch_size,
+        )
 
         output_dict = {"output": output}
         if output in ("depth", "depth_colored"):
             output_dict["normalization"] = normalization
-            output_dict["apply_sky_clip"] = apply_sky_clip
+            output_dict["apply_sky_clip"] = False
         elif output in ("sky_mask", "confidence"):
-            output_dict["colored"] = colored
+            output_dict["colored"] = False
 
         result = DA3Render.execute.__func__(DA3Render, geometry, output_dict)
         result = _unwrap_node_output(result)
+
+        if output == "depth" and normalization == "raw":
+            result = 1.0 - result
 
         if not keep_model_loaded:
             mm.unload_model_and_clones(da3_model, unload_additional_models=True)
@@ -202,5 +253,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "CRT_DepthAnything3": "DepthAnything3 (CRT)",
+    "CRT_DepthAnything3": "Fast Depth Anything v3 (CRT)",
 }

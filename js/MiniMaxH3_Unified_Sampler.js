@@ -136,7 +136,7 @@ const SETTINGS_SECTIONS = [
   {
     id: "INFERENCE",
     title: "Inference",
-    fields: ["steps", "steps_turbo", "megapixels_target", "length_frames", "audio_frames_override", "video_frames_override"],
+    fields: ["steps", "steps_turbo", "shift_video", "shift_audio", "megapixels_target", "length_frames", "audio_frames_override", "video_frames_override"],
   },
   {
     id: "SPEED",
@@ -147,6 +147,16 @@ const SETTINGS_SECTIONS = [
     id: "OUTPUT",
     title: "Output",
     fields: ["vae_decode_tiled", "unload_before_decode", "low_vram", "generated_audio_gain_db"],
+  },
+  {
+    id: "DEROPE",
+    title: "Motion Smearing Fix",
+    fields: ["enable_derope", "enable_derope_adapter", "derope_preset", "derope_audio", "derope_mode", "derope_profile", "derope_inject", "derope_abstain", "derope_protect_tail"],
+  },
+  {
+    id: "NEGPIP",
+    title: "NegPiP",
+    fields: ["enable_negpip"],
   },
   {
     id: "PREVIEW",
@@ -160,6 +170,8 @@ const FIELD_LABELS = {
   fl_aspect_mode: "If F/L aspect differs",
   steps: "Steps",
   steps_turbo: "Steps Turbo",
+  shift_video: "Sigma Shift (video)",
+  shift_audio: "Sigma Shift (audio)",
   turbo: "Turbo",
   enable_sol_attn: "Sol Attention",
   enable_chunk_ff: "Chunk FeedForward",
@@ -172,15 +184,30 @@ const FIELD_LABELS = {
   unload_before_decode: "Unload \u2192 VAE",
   low_vram: "Low VRAM",
   generated_audio_gain_db: "Audio Gain (dB)",
+  enable_derope: "De-ROPE",
+  derope_preset: "Preset",
+  derope_inject: "Inject Strength",
+  derope_audio: "Audio Source",
+  derope_mode: "Dilation Mode",
+  derope_profile: "Oracle Profile",
+  derope_abstain: "Abstain Below",
+  derope_protect_tail: "Protect Tail",
+  enable_derope_adapter: "Motion Adapter",
+  enable_negpip: "NegPiP",
 };
 
 // Explicit +/- step per widget (units per click; hold-to-repeat uses the same).
 const NUMBER_STEPS = {
   steps: 1,
   steps_turbo: 1,
+  shift_video: 0.5,
+  shift_audio: 0.5,
   megapixels_target: 0.1,
   length_frames: 17,
   generated_audio_gain_db: 0.1,
+  derope_inject: 0.05,
+  derope_abstain: 0.1,
+  derope_protect_tail: 1,
 };
 
 // Value snapping applied on commit and after each step.
@@ -216,6 +243,21 @@ function getComboOptions(widget) {
   }
   return [];
 }
+
+// Sub-knobs with progressive disclosure. Each field maps to a list of
+// conditions that must ALL hold: a string means "master is truthy", an object
+// means "master equals value". The de-rope tuning knobs only appear when the
+// preset is Custom, so the section stays a single dropdown by default.
+const SUB_FIELD_MASTERS = {
+  derope_preset: ["enable_derope"],
+  enable_derope_adapter: ["enable_derope"],
+  derope_inject: ["enable_derope", { master: "derope_preset", value: "Custom" }],
+  derope_audio: ["enable_derope", { master: "derope_preset", value: "Custom" }],
+  derope_mode: ["enable_derope", { master: "derope_preset", value: "Custom" }],
+  derope_profile: ["enable_derope", { master: "derope_preset", value: "Custom" }],
+  derope_abstain: ["enable_derope", { master: "derope_preset", value: "Custom" }],
+  derope_protect_tail: ["enable_derope", { master: "derope_preset", value: "Custom" }],
+};
 
 function fieldLabel(name) {
   return FIELD_LABELS[name] || name;
@@ -620,6 +662,8 @@ class MiniMaxH3UnifiedSamplerUI {
     this.controls = new Map();
     this.panels = new Map();
     this.tabs = new Map();
+    // Expand-on-toggle sub-rows: hidden until their master toggle is on.
+    this.subRows = [];
     this.resizeTimer = null;
     this.previewUrl = null;
     this.previewHandler = null;
@@ -697,6 +741,7 @@ class MiniMaxH3UnifiedSamplerUI {
     this.controls.clear();
     this.panels.clear();
     this.tabs.clear();
+    this.subRows = [];
 
     const shell = document.createElement("div");
     shell.className = "crt-h3us-shell";
@@ -916,6 +961,14 @@ class MiniMaxH3UnifiedSamplerUI {
       controlWrap.appendChild(this.makeNumber(name, widget));
     }
 
+    const conditions = SUB_FIELD_MASTERS[name];
+    if (conditions) {
+      row.dataset.subOf = conditions
+        .map((c) => (typeof c === "string" ? c : c.master))
+        .join(",");
+      this.subRows.push({ row, conditions });
+    }
+
     return row;
   }
 
@@ -1107,6 +1160,10 @@ class MiniMaxH3UnifiedSamplerUI {
     if (previous !== value) {
       this.node.setDirtyCanvas(true, true);
     }
+    if (name === "enable_derope" || name === "enable_derope_adapter" || name === "derope_preset" || name === "enable_negpip") {
+      this.updateSubRowVisibility();
+      this.scheduleResize();
+    }
     if (name === "workflow_mode") {
       this.mode = String(value);
       if (this.activeView === previous) {
@@ -1249,6 +1306,7 @@ class MiniMaxH3UnifiedSamplerUI {
       this.activeView = this.mode;
     }
     this.updatePreviewTabVisibility();
+    this.updateSubRowVisibility();
     for (const [key, button] of this.tabs.entries()) {
       button.classList.toggle("mode-active", WORKFLOW_MODES.includes(key) && key === this.mode);
       button.classList.toggle("view-active", key === this.activeView);
@@ -1289,6 +1347,19 @@ class MiniMaxH3UnifiedSamplerUI {
     if (!enabled && this.activeView === "PREVIEW") {
       this.activeView = this.mode;
       this.persistView();
+    }
+  }
+
+  updateSubRowVisibility() {
+    for (const entry of this.subRows || []) {
+      const enabled = (entry.conditions || []).every((c) => {
+        const widget = getWidget(this.node, typeof c === "string" ? c : c.master);
+        if (!widget) return false;
+        return c.value === undefined
+          ? Boolean(widget.value)
+          : String(widget.value) === String(c.value);
+      });
+      entry.row.style.display = enabled ? "" : "none";
     }
   }
 

@@ -3,6 +3,8 @@ from pathlib import Path
 
 import torch
 
+from ._crawl_common import pick_folder, scan_tree, to_int
+
 
 def _load_audio_file(path):
     """Decode audio -> (waveform [channels, samples] float32, sample_rate).
@@ -60,14 +62,23 @@ class AudioLoaderCrawl:
                         "default": 0,
                         "min": 0,
                         "max": 0xFFFFFFFFFFFFFFFF,
-                        "tooltip": "Seed for deterministic file selection",
+                        "control_after_generate": True,
+                        "tooltip": "Selects the file. With no subfolder seed connected, crawls each folder's first file, then each folder's second file, etc.",
                     },
                 ),
                 "file_extension": (
                     ["wav", "mp3", "flac", "ogg"],
                     {"default": "wav", "tooltip": "File extension to filter for"},
                 ),
-                "crawl_subfolders": ("BOOLEAN", {"default": False, "tooltip": "If true, include files in subfolders"}),
+                "max_depth": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": -1,
+                        "max": 100,
+                        "tooltip": "Subfolder crawl depth. 0 = only the root folder, 1 = one level deep, -1 = infinite.",
+                    },
+                ),
                 "remove_extension": ("BOOLEAN", {"default": False, "tooltip": "Output filename without extension"}),
                 "max_length_seconds": (
                     "FLOAT",
@@ -91,7 +102,16 @@ class AudioLoaderCrawl:
                     "FLOAT",
                     {"default": 0.0, "min": -120.0, "max": 120.0, "step": 0.1, "tooltip": "Gain in decibels (dB)"},
                 ),
-            }
+            },
+            "optional": {
+                "subfolder_seed": (
+                    "INT",
+                    {
+                        "forceInput": True,
+                        "tooltip": "Selects the folder as seed % number_of_folders. Leave unconnected to crawl folders column-major with the main seed.",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("AUDIO", "STRING", "STRING")
@@ -104,11 +124,12 @@ class AudioLoaderCrawl:
         folder_path,
         seed,
         file_extension,
-        crawl_subfolders,
+        max_depth,
         remove_extension,
         max_length_seconds,
         start_offset_seconds,
         gain_db,
+        subfolder_seed=None,
     ):
         # Failure returns None for audio: downstream reference nodes (e.g. MiniMax H3)
         # skip None audio cleanly. Do NOT substitute fake silence here — a tiny silent
@@ -128,36 +149,42 @@ class AudioLoaderCrawl:
         if not file_extension.startswith('.'):
             file_extension = f".{file_extension}"
 
+        seed = to_int(seed)
+        max_depth = to_int(max_depth)
+        sub_seed = to_int(subfolder_seed) if subfolder_seed is not None else None
+
         try:
             # --- Smart Caching Logic ---
-            cache_key = f"{str(folder.resolve())}_{crawl_subfolders}_{file_extension}"
+            cache_key = (str(folder.resolve()), max_depth)
             current_mtime = folder.stat().st_mtime
 
             if cache_key not in self.cache or self.cache[cache_key]['mtime'] != current_mtime:
                 print(f"[INFO] Folder changed or not cached. Scanning '{folder}' for '{file_extension}' files...")
-                pattern = f'*{file_extension}'
-                if crawl_subfolders:
-                    files = sorted([f for f in folder.rglob(pattern) if f.is_file()])
-                else:
-                    files = sorted([f for f in folder.glob(pattern) if f.is_file()])
+                folders, files_by_folder = scan_tree(folder, max_depth)
+                self.cache[cache_key] = {'folders': folders, 'files': files_by_folder, 'mtime': current_mtime}
+                print(f"[OK] Cached folder tree from '{folder}'.")
+            folders = self.cache[cache_key]['folders']
+            files_by_folder = self.cache[cache_key]['files']
 
-                self.cache[cache_key] = {'files': files, 'mtime': current_mtime}
-                print(f"[OK] Cached {len(files)} files.")
+            selected_folder, inner_seed = pick_folder(folders, sub_seed, seed)
+            if selected_folder is None:
+                print("[ERROR] No folders found under the given path.")
+                return safe_return
 
-            files = self.cache[cache_key]['files']
-            # --- End Caching Logic ---
+            files = [f for f in files_by_folder.get(os.path.normpath(str(selected_folder)), []) if f.suffix.lower() == file_extension]
+            files.sort()
 
             if not files:
-                print(f"[ERROR] Warning: No files with extension '{file_extension}' found in '{folder}'.")
+                print(f"[ERROR] Warning: No files with extension '{file_extension}' found in '{selected_folder}'.")
                 return safe_return
 
             # --- Deterministic and Safe Selection ---
             num_files = len(files)
-            selected_index = seed % num_files
+            selected_index = inner_seed % num_files
             selected_file = files[selected_index]
             # --- End Selection ---
 
-            print(f"[OK] Seed {seed} -> File {selected_index + 1}/{num_files}: '{selected_file.name}'")
+            print(f"[OK] Seed {seed} -> Folder '{selected_folder.name}' File {selected_index + 1}/{num_files}: '{selected_file.name}'")
 
             # --- Load and Process Audio (pure PyAV, like core LoadAudio) ---
             waveform, sample_rate = _load_audio_file(selected_file)

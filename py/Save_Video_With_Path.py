@@ -7,6 +7,37 @@ import folder_paths
 import tempfile
 import subprocess
 import json
+import wave
+
+
+def _write_audio(audio, temp_dir, video_duration):
+    """Write the ComfyUI AUDIO dict as a 16-bit PCM wav matching the video length."""
+    waveform = audio["waveform"]
+    sample_rate = int(audio["sample_rate"])
+
+    if waveform.ndim != 3:
+        waveform = waveform.unsqueeze(0)
+    data = waveform[0].cpu().numpy().astype(np.float32)
+
+    if data.ndim == 1:
+        data = data[None, :]
+
+    target_samples = int(round(video_duration * sample_rate))
+    if data.shape[-1] > target_samples:
+        data = data[..., :target_samples]
+    elif data.shape[-1] < target_samples:
+        data = np.pad(data, ((0, 0), (0, target_samples - data.shape[-1])))
+
+    pcm = np.clip(data, -1.0, 1.0)
+    pcm = (pcm.T * 32767.0).astype(np.int16)
+
+    wav_path = os.path.join(temp_dir, "audio.wav")
+    with wave.open(wav_path, "wb") as w:
+        w.setnchannels(pcm.shape[1])
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes(pcm.tobytes())
+    return wav_path
 
 
 class SaveVideoWithPath:
@@ -25,6 +56,10 @@ class SaveVideoWithPath:
                 "fps": ("INT", {"default": 16, "min": 1, "max": 120}),
                 "frames_limit": ("INT", {"default": -1, "min": -1, "max": 10000}),
                 "activate": ("BOOLEAN", {"default": True}),
+                "overwrite": ("BOOLEAN", {"default": False, "tooltip": "Overwrite an existing file with the same name. If off, a _1, _2, ... suffix is added."}),
+            },
+            "optional": {
+                "audio": ("AUDIO",),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -43,6 +78,8 @@ class SaveVideoWithPath:
         fps,
         frames_limit,
         activate,
+        overwrite,
+        audio=None,
         prompt=None,
         extra_pnginfo=None,
     ):
@@ -73,6 +110,13 @@ class SaveVideoWithPath:
             os.makedirs(final_dir, exist_ok=True)
             final_filepath = os.path.join(final_dir, filename_clean + suffix_clean + ".mp4")
 
+            if not overwrite:
+                counter = 1
+                base = filename_clean + suffix_clean
+                while os.path.exists(final_filepath):
+                    final_filepath = os.path.join(final_dir, f"{base}_{counter}.mp4")
+                    counter += 1
+
             if not os.access(final_dir, os.W_OK):
                 raise IOError(f"Error: No write permissions for directory {final_dir}")
 
@@ -97,6 +141,11 @@ class SaveVideoWithPath:
                     "-i",
                     os.path.join(temp_dir, "frame_%06d.png"),
                 ]
+
+                audio_path = None
+                if audio is not None:
+                    audio_path = _write_audio(audio, temp_dir, len(frames) / fps)
+                    ffmpeg_cmd.extend(["-i", audio_path])
 
                 metadata_str = ""
                 video_metadata = {}
@@ -132,8 +181,14 @@ class SaveVideoWithPath:
                     "fast",
                 ]
 
+                if audio is not None:
+                    output_options.extend(["-c:a", "aac", "-b:a", "192k"])
+
                 if video_metadata:
-                    output_options.extend(["-map", "0:v", "-map_metadata", "1"])
+                    metadata_index = 2 if audio_path is not None else 1
+                    output_options.extend(["-map", "0:v", "-map_metadata", str(metadata_index)])
+                if audio_path is not None:
+                    output_options.extend(["-map", "1:a"])
 
                 output_options.append(final_filepath)
                 ffmpeg_cmd.extend(output_options)

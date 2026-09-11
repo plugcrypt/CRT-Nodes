@@ -188,6 +188,7 @@ class _OutputState:
     sigma_v: torch.Tensor
     shift_v: float
     shift_a: float
+    sample_sigmas: Any
     original_video_shape: tuple[int, int, int]
     padded_video_shape: tuple[int, int, int]
 
@@ -313,6 +314,7 @@ def _prepare_output_state(
         sigma_v=sigma_v,
         shift_v=shift_v,
         shift_a=shift_a,
+        sample_sigmas=transformer_options.get("sample_sigmas"),
         original_video_shape=tuple(int(v) for v in video_x.shape[-3:]),
         padded_video_shape=(padded_t, padded_h, padded_w),
     )
@@ -454,6 +456,9 @@ def _execute_forecast(
         state.t_emb,
         video_segment,
         audio_segment,
+        state.sigma_v,
+        state.sample_sigmas,
+        (state.shift_v, state.shift_a),
     )
     latent_t, latent_h, latent_w = state.padded_video_shape
     video_out = module.unpatchify_video(
@@ -655,7 +660,36 @@ def diffusion_model_wrapper(
     except (RuntimeError, TypeError, ValueError) as exc:
         if runtime.offline_phase == "replay":
             raise OfflineReplayAbort(f"offline replay output-head evaluation failed: {exc}") from exc
-        raise
+        # A forecast whose output head cannot run (model/API mismatch, or an
+        # external patch such as the Fun ControlNet perturbing the final
+        # feature) must not abort the run. Disable forecasting and evaluate
+        # this step for real; fallback_current_step raises ForecastRetryActual
+        # when a forecast was already consumed, which the sampler retries actual.
+        LOG.warning(
+            "Spectrum H3 forecast output-head failed (%s: %s); disabling forecasting "
+            "and evaluating this step actual",
+            type(exc).__name__, exc,
+        )
+        runtime.fallback_current_step(
+            int(run_id),
+            int(step_id),
+            f"forecast output-head evaluation failed: {type(exc).__name__}: {exc}",
+        )
+        return _execute_actual(
+            executor,
+            inner,
+            runtime,
+            int(run_id),
+            int(step_id),
+            call_id,
+            layout,
+            x,
+            timestep,
+            context,
+            options,
+            minimax_payload,
+            kwargs,
+        )
     if runtime.config.debug:
         LOG.warning(
             "Spectrum H3 forecast complete run_id=%s step=%s chunks=%s history=%s",

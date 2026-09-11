@@ -1,11 +1,13 @@
 import os
-from collections import OrderedDict
 from pathlib import Path
+
+from ._crawl_common import pick_folder, scan_tree, to_int
 
 
 class TextLoaderCrawl:
     def __init__(self):
-        # Instance-level cache to store file lists and folder modification times.
+        # Instance-level cache of the folder tree, keyed by (resolved root, max_depth)
+        # and invalidated when the root directory's mtime changes.
         self.cache = {}
 
     @classmethod
@@ -19,21 +21,38 @@ class TextLoaderCrawl:
                         "default": 0,
                         "min": 0,
                         "max": 0xFFFFFFFFFFFFFFFF,
-                        "tooltip": "Seed for deterministic file selection",
+                        "control_after_generate": True,
+                        "tooltip": "Selects the file. With no subfolder seed connected, crawls each folder's first file, then each folder's second file, etc.",
                     },
                 ),
                 "file_extension": (
                     "STRING",
                     {"default": ".txt", "tooltip": "File extension to filter (e.g., .txt, .md)"},
                 ),
+                "max_depth": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": -1,
+                        "max": 100,
+                        "tooltip": "Subfolder crawl depth. 0 = only the root folder, 1 = one level deep, -1 = infinite.",
+                    },
+                ),
                 "max_words": (
                     "INT",
                     {"default": 0, "min": 0, "tooltip": "Maximum number of words in output (0 for no limit)"},
                 ),
-                "crawl_subfolders": ("BOOLEAN", {"default": False, "tooltip": "If true, include files in subfolders"}),
-                "interleave_subfolders": ("BOOLEAN", {"default": False, "tooltip": "When crawling subfolders with incrementing seed: if ON, iterate through each folder's 1st file, then each folder's 2nd file, etc. If OFF (default), iterate through all files in folder 1, then folder 2, etc."}),
                 "remove_extension": ("BOOLEAN", {"default": False, "tooltip": "Output filename without extension"}),
-            }
+            },
+            "optional": {
+                "subfolder_seed": (
+                    "INT",
+                    {
+                        "forceInput": True,
+                        "tooltip": "Selects the folder as seed % number_of_folders. Leave unconnected to crawl folders column-major with the main seed.",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("STRING", "STRING", "STRING")
@@ -48,7 +67,7 @@ class TextLoaderCrawl:
         words = text.split()
         return ' '.join(words[:max_words])
 
-    def load_text_file(self, folder_path, seed, file_extension, max_words, crawl_subfolders, interleave_subfolders, remove_extension):
+    def load_text_file(self, folder_path, seed, file_extension, max_depth, max_words, remove_extension, subfolder_seed=None):
         # Define a safe, empty return value for error cases
         safe_return = ("", "", "")
 
@@ -61,63 +80,44 @@ class TextLoaderCrawl:
             print(f"[ERROR] Error: Folder '{folder}' not found or is not a directory.")
             return safe_return
 
-        file_extension = file_extension.strip().lower()
-        if file_extension and not file_extension.startswith('.'):
-            file_extension = f".{file_extension}"
+        ext = file_extension.strip().lower()
+        if ext and not ext.startswith('.'):
+            ext = f".{ext}"
+
+        seed = to_int(seed)
+        max_depth = to_int(max_depth)
+        sub_seed = to_int(subfolder_seed) if subfolder_seed is not None else None
 
         try:
-            # --- Smart Caching Logic ---
-            cache_key = f"{str(folder.resolve())}_{crawl_subfolders}_{file_extension}"
+            cache_key = (str(folder.resolve()), max_depth)
             current_mtime = folder.stat().st_mtime
 
             if cache_key not in self.cache or self.cache[cache_key]['mtime'] != current_mtime:
-                print(f"[INFO] Folder changed or not cached. Scanning '{folder}' for '{file_extension}' files...")
-                if crawl_subfolders:
-                    files = sorted([f for f in folder.rglob(f'*{file_extension}') if f.is_file()])
-                else:
-                    # Use glob for simpler filtering
-                    files = sorted([f for f in folder.glob(f'*{file_extension}') if f.is_file()])
+                print(f"[INFO] Folder changed or not cached. Scanning '{folder}' (depth {max_depth})...")
+                folders, files_by_folder = scan_tree(folder, max_depth)
+                self.cache[cache_key] = {'folders': folders, 'files': files_by_folder, 'mtime': current_mtime}
+            folders = self.cache[cache_key]['folders']
+            files_by_folder = self.cache[cache_key]['files']
 
-                self.cache[cache_key] = {'files': files, 'mtime': current_mtime}
-                print(f"[OK] Cached {len(files)} files.")
-
-            files = self.cache[cache_key]['files']
-            # --- End Caching Logic ---
-
-            if not files:
-                print(f"[ERROR] Warning: No files with extension '{file_extension}' found in '{folder}'.")
+            selected_folder, inner_seed = pick_folder(folders, sub_seed, seed)
+            if selected_folder is None:
+                print("[ERROR] No folders found under the given path.")
                 return safe_return
 
-            # --- Deterministic and Safe Selection ---
+            files = files_by_folder.get(os.path.normpath(str(selected_folder)), [])
+            if ext:
+                files = [f for f in files if f.suffix.lower() == ext]
+            files.sort()
+
+            if not files:
+                print(f"[ERROR] Warning: No files with extension '{ext}' found in '{selected_folder}'.")
+                return safe_return
+
             num_files = len(files)
+            selected_index = inner_seed % num_files
+            selected_file = files[selected_index]
 
-            if crawl_subfolders and interleave_subfolders:
-                # Group files by their parent folder, preserving sorted order
-                folders = OrderedDict()
-                for f in files:
-                    parent = str(f.parent.resolve())
-                    if parent not in folders:
-                        folders[parent] = []
-                    folders[parent].append(f)
-
-                folder_lists = list(folders.values())
-                max_files = max(len(fl) for fl in folder_lists) if folder_lists else 0
-
-                # Build interleaved index: folder1[0], folder2[0], folder3[0], folder1[1], folder2[1], ...
-                interleaved = []
-                for i in range(max_files):
-                    for fl in folder_lists:
-                        if i < len(fl):
-                            interleaved.append(fl[i])
-
-                selected_index = seed % len(interleaved)
-                selected_file = interleaved[selected_index]
-            else:
-                selected_index = seed % num_files
-                selected_file = files[selected_index]
-            # --- End Selection ---
-
-            print(f"[OK] Seed {seed} -> File {selected_index + 1}/{num_files}: '{selected_file.name}'")
+            print(f"[OK] Seed {seed} -> Folder '{selected_folder.name}' File {selected_index + 1}/{num_files}: '{selected_file.name}'")
 
             with open(selected_file, 'r', encoding='utf-8', errors='ignore') as file:
                 content = file.read()

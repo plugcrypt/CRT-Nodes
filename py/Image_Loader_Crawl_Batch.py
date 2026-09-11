@@ -1,11 +1,15 @@
 from concurrent.futures import Future, ThreadPoolExecutor
+import os
 import re
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
 from PIL import Image, ImageOps
+
+from ._crawl_common import scan_tree, to_int
 
 
 VALID_EXTENSIONS = {
@@ -102,7 +106,7 @@ class CRT_ImageLoaderCrawlBatch:
         canvas.paste(image, (left, top))
         return canvas
 
-    def _prepare_batch(self, files, selected_indices, megapixels, no_resize):
+    def _prepare_batch(self, files, selected_indices, megapixels):
         images = []
         errors = []
 
@@ -110,7 +114,7 @@ class CRT_ImageLoaderCrawlBatch:
             path = files[index]
             try:
                 image = self._decode_rgb(path)
-                if not no_resize:
+                if megapixels > 0:
                     width, height = self._target_dimensions(
                         image.width,
                         image.height,
@@ -126,7 +130,7 @@ class CRT_ImageLoaderCrawlBatch:
         shapes = {(image.height, image.width) for image in images}
         mixed_shapes = len(shapes) > 1
 
-        if mixed_shapes and no_resize:
+        if mixed_shapes and megapixels == 0:
             # ComfyUI IMAGE batches require a common H/W. Preserve every source
             # pixel and center-pad smaller images instead of resampling them.
             target_width = max(image.width for image in images)
@@ -209,11 +213,10 @@ class CRT_ImageLoaderCrawlBatch:
         return tensors, errors, mixed_shapes
 
     @staticmethod
-    def _batch_key(files, selected_indices, megapixels, no_resize):
+    def _batch_key(files, selected_indices, megapixels):
         return (
             tuple(str(files[index]) for index in selected_indices),
             float(megapixels),
-            bool(no_resize),
         )
 
     def _consume_prefetch_or_load(
@@ -222,7 +225,6 @@ class CRT_ImageLoaderCrawlBatch:
         files,
         selected_indices,
         megapixels,
-        no_resize,
     ):
         with self._prefetch_lock:
             if (
@@ -248,7 +250,6 @@ class CRT_ImageLoaderCrawlBatch:
             files,
             selected_indices,
             megapixels,
-            no_resize,
         )
 
     def _schedule_prefetch(
@@ -257,7 +258,6 @@ class CRT_ImageLoaderCrawlBatch:
         files,
         selected_indices,
         megapixels,
-        no_resize,
     ):
         with self._prefetch_lock:
             if self._prefetch_future is not None:
@@ -269,7 +269,6 @@ class CRT_ImageLoaderCrawlBatch:
                 files,
                 selected_indices,
                 megapixels,
-                no_resize,
             )
 
     def _cancel_prefetch(self):
@@ -313,6 +312,7 @@ class CRT_ImageLoaderCrawlBatch:
                         "default": 0,
                         "min": 0,
                         "max": 0xFFFFFFFFFFFFFFFF,
+                        "control_after_generate": True,
                         "tooltip": (
                             "Selects the starting image: "
                             "index = (seed × batch_count) % total_images."
@@ -323,26 +323,25 @@ class CRT_ImageLoaderCrawlBatch:
                     "FLOAT",
                     {
                         "default": 1.0,
-                        "min": 0.1,
+                        "min": 0.0,
                         "max": 16.0,
                         "step": 0.05,
                         "tooltip": (
-                            "Target resolution in megapixels. Ignored when "
-                            "No resize is enabled."
+                            "Target resolution in megapixels. Use 0 to keep "
+                            "the source resolution (no resize). Mixed-size "
+                            "batches are center-padded to the largest image."
                         ),
                     },
                 ),
-                "No resize": (
-                    "BOOLEAN",
+                "max_depth": (
+                    "INT",
                     {
-                        "default": False,
-                        "tooltip": (
-                            "Bypass resampling. Mixed-size batches are "
-                            "center-padded to the largest image."
-                        ),
+                        "default": 0,
+                        "min": -1,
+                        "max": 100,
+                        "tooltip": "Subfolder crawl depth. 0 = only the root folder, 1 = one level deep, -1 = infinite.",
                     },
                 ),
-                "crawl_subfolders": ("BOOLEAN", {"default": False}),
                 "remove_extension": ("BOOLEAN", {"default": False}),
                 "print_index": (
                     "BOOLEAN",
@@ -354,7 +353,16 @@ class CRT_ImageLoaderCrawlBatch:
                         ),
                     },
                 ),
-            }
+            },
+            "optional": {
+                "subfolder_seed": (
+                    "INT",
+                    {
+                        "forceInput": True,
+                        "tooltip": "Restricts the batch window to the folder selected by seed % number_of_folders. Leave unconnected to batch across the whole tree.",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("IMAGE", "STRING", "STRING", "INT", "INT", "STRING")
@@ -369,6 +377,34 @@ class CRT_ImageLoaderCrawlBatch:
     FUNCTION = "load_batch"
     CATEGORY = "CRT/Load"
 
+    @classmethod
+    def IS_CHANGED(cls, folder_path, batch_count, seed, megapixels, max_depth,
+                   remove_extension, print_index, **kwargs):
+        # Nodes without input links are cache-skipped while their widget values
+        # are unchanged, so images swapped inside the folder would never reload
+        # without checking the selected files' external state here.
+        try:
+            folder = Path(str(folder_path).strip()).expanduser()
+            if not folder.is_dir():
+                return 0
+            folder = folder.resolve()
+            _, files_by_folder = scan_tree(folder, to_int(max_depth))
+            files = [p for fl in files_by_folder.values() for p in fl]
+            files = [p for p in files if p.suffix.lower() in VALID_EXTENSIONS]
+            files = sorted(files, key=cls.natural_sort_key)
+            total = len(files)
+            if total == 0:
+                return 0
+            start = (int(seed) * int(batch_count)) % total
+            state = [folder.stat().st_mtime_ns]
+            for index in range(int(batch_count)):
+                stat = files[(start + index) % total].stat()
+                state.append(stat.st_mtime_ns)
+                state.append(stat.st_size)
+            return hash(tuple(state))
+        except Exception:
+            return time.time()
+
     # -- Main ------------------------------------------------------------------
 
     def load_batch(
@@ -377,15 +413,14 @@ class CRT_ImageLoaderCrawlBatch:
         batch_count,
         seed,
         megapixels,
-        crawl_subfolders,
+        max_depth,
         remove_extension,
         print_index,
+        subfolder_seed=None,
         **kwargs,
     ):
         tag = "[CRT Image Loader Crawl Batch]"
-        no_resize = bool(
-            kwargs.get("No resize", kwargs.get("no_resize", False))
-        )
+        megapixels = float(megapixels)
 
         def blank():
             return torch.zeros(1, 64, 64, 3, dtype=torch.float32)
@@ -400,26 +435,30 @@ class CRT_ImageLoaderCrawlBatch:
         folder = folder.resolve()
 
         # -- File-list cache ---------------------------------------------------
-        cache_key = str(folder) + ("_sub" if crawl_subfolders else "")
+        seed = to_int(seed)
+        max_depth = to_int(max_depth)
+        sub_seed = to_int(subfolder_seed) if subfolder_seed is not None else None
+        cache_key = (str(folder), max_depth, sub_seed)
         current_mtime = folder.stat().st_mtime_ns
 
         if (
             cache_key not in self.cache
             or self.cache[cache_key]["mtime"] != current_mtime
         ):
-            print(f"{tag} Scanning '{folder}'...")
+            print(f"{tag} Scanning '{folder}' (depth {max_depth})...")
             try:
-                iterator = (
-                    folder.rglob("*")
-                    if crawl_subfolders
-                    else folder.glob("*")
-                )
+                folders, files_by_folder = scan_tree(folder, max_depth)
+                tree_files = [p for fl in files_by_folder.values() for p in fl]
+                if sub_seed is not None:
+                    if not folders:
+                        raise ValueError("No folders found under the given path")
+                    sel_folder = folders[sub_seed % len(folders)]
+                    tree_files = files_by_folder.get(os.path.normpath(str(sel_folder)), [])
                 files = sorted(
                     (
                         path
-                        for path in iterator
-                        if path.is_file()
-                        and path.suffix.lower() in VALID_EXTENSIONS
+                        for path in tree_files
+                        if path.suffix.lower() in VALID_EXTENSIONS
                     ),
                     key=self.natural_sort_key,
                 )
@@ -452,18 +491,16 @@ class CRT_ImageLoaderCrawlBatch:
             files,
             selected_indices,
             megapixels,
-            no_resize,
         )
         tensors, errors, mixed_shapes = self._consume_prefetch_or_load(
             current_key,
             files,
             selected_indices,
             megapixels,
-            no_resize,
         )
 
         if mixed_shapes:
-            if no_resize:
+            if megapixels == 0:
                 print(
                     f"{tag} Mixed resolutions detected - "
                     "center-padding without resampling."
@@ -508,14 +545,12 @@ class CRT_ImageLoaderCrawlBatch:
             files,
             next_indices,
             megapixels,
-            no_resize,
         )
         self._schedule_prefetch(
             next_key,
             files,
             next_indices,
             megapixels,
-            no_resize,
         )
 
         return (

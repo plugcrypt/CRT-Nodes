@@ -3,6 +3,8 @@ from pathlib import Path
 import random
 import re  # Required for natural sorting
 
+from ._crawl_common import scan_tree, to_int
+
 
 class TextLoaderCrawlBatch:
 
@@ -27,6 +29,7 @@ class TextLoaderCrawlBatch:
                         "default": 0,
                         "min": 0,
                         "max": 0xFFFFFFFFFFFFFFFF,
+                        "control_after_generate": True,
                         "tooltip": "Acts as a batch offset. Set to 0 to start from the first file.",
                     },
                 ),
@@ -34,15 +37,29 @@ class TextLoaderCrawlBatch:
                     "STRING",
                     {"default": ".txt", "tooltip": "The file extension to filter for (e.g., .txt)"},
                 ),
+                "max_depth": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": -1,
+                        "max": 100,
+                        "tooltip": "Subfolder crawl depth. 0 = only the root folder, 1 = one level deep, -1 = infinite.",
+                    },
+                ),
                 "max_words": (
                     "INT",
                     {"default": 0, "min": 0, "tooltip": "Maximum number of words per output (0 for no limit)"},
                 ),
-                "crawl_subfolders": (
-                    "BOOLEAN",
-                    {"default": False, "tooltip": "Whether to include files in subfolders"},
+            },
+            "optional": {
+                "subfolder_seed": (
+                    "INT",
+                    {
+                        "forceInput": True,
+                        "tooltip": "Restricts the batch window to the folder selected by seed % number_of_folders. Leave unconnected to batch across the whole tree.",
+                    },
                 ),
-            }
+            },
         }
 
     RETURN_TYPES = ("STRING",)
@@ -60,7 +77,7 @@ class TextLoaderCrawlBatch:
         # Always re-run the node to respond to seed changes
         return True
 
-    def load_text_files_batch(self, folder_path, batch_count, seed, file_extension, max_words, crawl_subfolders):
+    def load_text_files_batch(self, folder_path, batch_count, seed, file_extension, max_depth, max_words, subfolder_seed=None):
         safe_return = tuple([""] * (batch_count * 2))
         if not folder_path or not Path(folder_path).is_dir():
             print(f"[ERROR] Error: Folder '{folder_path}' not found or is not a directory.")
@@ -73,15 +90,26 @@ class TextLoaderCrawlBatch:
                 [f"text_output_{i+1}" for i in range(batch_count)] + [f"file_name_{i+1}" for i in range(batch_count)]
             )
 
-            # Scan and naturally sort the files
             folder = Path(folder_path)
             file_ext = f".{file_extension.strip().lstrip('.').lower()}"
-            if crawl_subfolders:
-                file_list = [f for f in folder.rglob(f'*{file_ext}') if f.is_file()]
-            else:
-                file_list = [f for f in folder.glob(f'*{file_ext}') if f.is_file()]
+            seed = to_int(seed)
+            max_depth = to_int(max_depth)
+            sub_seed = to_int(subfolder_seed) if subfolder_seed is not None else None
 
-            all_files = sorted(file_list, key=self.natural_sort_key)
+            folders, files_by_folder = scan_tree(folder, max_depth)
+            if sub_seed is not None:
+                if not folders:
+                    print("[ERROR] No folders found under the given path.")
+                    return safe_return
+                sel_folder = folders[sub_seed % len(folders)]
+                file_list = files_by_folder.get(os.path.normpath(str(sel_folder)), [])
+            else:
+                file_list = [p for fl in files_by_folder.values() for p in fl]
+
+            all_files = sorted(
+                (f for f in file_list if f.suffix.lower() == file_ext),
+                key=self.natural_sort_key,
+            )
 
             if not all_files:
                 print(f"[ERROR] Warning: No files with extension '{file_ext}' found.")

@@ -1152,9 +1152,10 @@ def _extract_urls(text):
         return []
     urls = []
     for match in URL_PATTERN.findall(str(text)):
-        url = match.rstrip(".,;:!?")
-        if url not in urls:
-            urls.append(url)
+        for part in re.split(r"(?=https?://)|\\[nrt]", match, flags=re.IGNORECASE):
+            url = part.strip().rstrip(".,;:!?")
+            if url and url not in urls:
+                urls.append(url)
     return urls
 
 
@@ -1932,6 +1933,16 @@ class UnslothLLM:
                         ),
                     },
                 ),
+                "url_web_search": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "tooltip": (
+                            "Optional joined URL string to fetch (e.g. from a join/text node, "
+                            "one link per line). Socket-only: no frontend text processing applies."
+                        ),
+                    },
+                ),
                 "studio_api_key": (
                     "STRING",
                     {
@@ -1982,14 +1993,14 @@ class UnslothLLM:
     DESCRIPTION = (
         "Connects ComfyUI to the model currently loaded in Unsloth Studio. "
         "Unsloth Studio must remain open; image input requires a vision model. "
-        "Detects http(s) URLs in the prompt and fetches their content. "
+        "Detects http(s) URLs in the prompt and url_web_search inputs and fetches their content. "
         "Set retain_last_response above 0 to keep previous answers in context across runs. "
         "Set temperature / top_p / top_k to -1 to use the server's active defaults, or to any value "
         "to override per run. Enable unload_model_after_run to release the model's VRAM "
         "after each run; the next run reloads it automatically."
     )
 
-    def generate(self, prompt, seed, unsloth_server_url=DEFAULT_UNSLOTH_STUDIO_URL, skills_path="", disable_thinking=True, include_reasoning=False, cache_skills=True, retain_last_response=0, image=None, temperature=-1.0, top_p=-1.0, top_k=-1, disable_web_search=False, studio_api_key="", unload_model_after_run=False, live_display=True, unique_id=None):
+    def generate(self, prompt, seed, unsloth_server_url=DEFAULT_UNSLOTH_STUDIO_URL, skills_path="", disable_thinking=True, include_reasoning=False, cache_skills=True, retain_last_response=0, image=None, temperature=-1.0, top_p=-1.0, top_k=-1, disable_web_search=False, url_web_search="", studio_api_key="", unload_model_after_run=False, live_display=True, unique_id=None):
         if (not prompt or not prompt.strip()) and image is None:
             print("[Unsloth Studio Bridge][WARN] Prompt is empty", file=sys.stderr)
         print(
@@ -2055,7 +2066,9 @@ class UnslothLLM:
         if disable_web_search:
             print("[Unsloth Studio Bridge] Web search disabled by node toggle", file=sys.stderr)
         else:
-            fetched, failures, searched = _web_content_from_prompt(prompt)
+            fetched, failures, searched = _web_content_from_prompt(
+                f"{prompt or ''}\n{url_web_search or ''}"
+            )
             for failure in failures:
                 print(f"[Unsloth Studio Bridge] WARNING: {failure}", file=sys.stderr)
             if fetched:
